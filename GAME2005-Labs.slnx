@@ -6,7 +6,7 @@
     <Platform Name="Win32" />
     <Platform Name="x64" />
   </Configurations>
-  <Project Path="GAME2005_Lab1.vcxproj" Id="0588F20F-7148-6E46-3A83-B7C3A602B322" DefaultStartup="true">
+  <Project Path="GAME2005-Labs.vcxproj" Id="15BF690C-817F-E542-4ABA-2EC0B6392A1F" DefaultStartup="true">
     <BuildDependency Project="raylib.vcxproj" />
   </Project>
   <Project Path="raylib.vcxproj" Id="8898EA18-743A-15EF-5DF5-284349369C3F">

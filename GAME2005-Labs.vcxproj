@@ -27,10 +27,10 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
-    <ProjectGuid>{0588F20F-7148-6E46-3A83-B7C3A602B322}</ProjectGuid>
+    <ProjectGuid>{15BF690C-817F-E542-4ABA-2EC0B6392A1F}</ProjectGuid>
     <IgnoreWarnCompileDuplicatedFilename>true</IgnoreWarnCompileDuplicatedFilename>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>GAME2005_Lab1</RootNamespace>
+    <RootNamespace>GAME2005-Labs</RootNamespace>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
@@ -99,43 +99,43 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
     <OutDir>$(ProjectDir)bin\Debug\</OutDir>
-    <IntDir>$(ProjectDir)obj\x64\Debug\GAME2005_Lab1\</IntDir>
-    <TargetName>GAME2005_Lab1</TargetName>
+    <IntDir>$(ProjectDir)obj\x64\Debug\GAME2005-Labs\</IntDir>
+    <TargetName>GAME2005-Labs</TargetName>
     <TargetExt>.exe</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
     <OutDir>$(ProjectDir)bin\Debug\</OutDir>
-    <IntDir>$(ProjectDir)obj\x86\Debug\GAME2005_Lab1\</IntDir>
-    <TargetName>GAME2005_Lab1</TargetName>
+    <IntDir>$(ProjectDir)obj\x86\Debug\GAME2005-Labs\</IntDir>
+    <TargetName>GAME2005-Labs</TargetName>
     <TargetExt>.exe</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <LinkIncremental>true</LinkIncremental>
     <OutDir>$(ProjectDir)bin\Debug\</OutDir>
-    <IntDir>$(ProjectDir)obj\ARM64\Debug\GAME2005_Lab1\</IntDir>
-    <TargetName>GAME2005_Lab1</TargetName>
+    <IntDir>$(ProjectDir)obj\ARM64\Debug\GAME2005-Labs\</IntDir>
+    <TargetName>GAME2005-Labs</TargetName>
     <TargetExt>.exe</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
     <OutDir>$(ProjectDir)bin\Release\</OutDir>
-    <IntDir>$(ProjectDir)obj\x64\Release\GAME2005_Lab1\</IntDir>
-    <TargetName>GAME2005_Lab1</TargetName>
+    <IntDir>$(ProjectDir)obj\x64\Release\GAME2005-Labs\</IntDir>
+    <TargetName>GAME2005-Labs</TargetName>
     <TargetExt>.exe</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
     <OutDir>$(ProjectDir)bin\Release\</OutDir>
-    <IntDir>$(ProjectDir)obj\x86\Release\GAME2005_Lab1\</IntDir>
-    <TargetName>GAME2005_Lab1</TargetName>
+    <IntDir>$(ProjectDir)obj\x86\Release\GAME2005-Labs\</IntDir>
+    <TargetName>GAME2005-Labs</TargetName>
     <TargetExt>.exe</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <LinkIncremental>false</LinkIncremental>
     <OutDir>$(ProjectDir)bin\Release\</OutDir>
-    <IntDir>$(ProjectDir)obj\ARM64\Release\GAME2005_Lab1\</IntDir>
-    <TargetName>GAME2005_Lab1</TargetName>
+    <IntDir>$(ProjectDir)obj\ARM64\Release\GAME2005-Labs\</IntDir>
+    <TargetName>GAME2005-Labs</TargetName>
     <TargetExt>.exe</TargetExt>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
