@@ -1,7 +1,7 @@
 #include "raylib.h"
 #include "raymath.h"   // Vector2 math + C++ operators (+, -, *, +=)
 #include <vector>
-#include <memory>      // std::shared_ptr, std::dynamic_pointer_cast
+#include <memory>      // std::shared_ptr
 #include <cmath>
 
 // ---------------- Screen settings ----------------
@@ -12,7 +12,7 @@ const int SCREEN_H = 720;
 // World: units, y goes UP. Screen: pixels, y goes DOWN.
 const float PX_PER_UNIT = 60.0f;
 const float ORIGIN_X = 80.0f;   // screen x of world x = 0
-const float ORIGIN_Y = 640.0f;  // screen y of world y = 0 (ground)
+const float ORIGIN_Y = 640.0f;  // screen y of world y = 0
 
 Vector2 WorldToScreen(Vector2 p)
 {
@@ -33,12 +33,11 @@ Vector2 VectorFromAngle(float angleDeg, float length)
 
 // =====================================================
 // Physics shapes: the shape + dimensions of a body
-// (used only by the collision system)
 // =====================================================
 enum class ShapeType
 {
-    Sphere
-    // Halfspace will be added in Lab 4
+    Sphere,
+    Halfspace
 };
 
 class PhysicsShape
@@ -60,30 +59,65 @@ public:
     ShapeType GetType() const override { return ShapeType::Sphere; }
 };
 
+// Halfspace: an infinite plane through the body's position,
+// plus EVERYTHING behind it (the side opposite to the normal).
+// In 2D the plane is a line and the halfspace is half of the screen.
+class Halfspace : public PhysicsShape
+{
+public:
+    float angleDeg = 0.0f;   // tilt of the surface: 0 = flat floor, 30 = rises to the right
+
+    explicit Halfspace(float angle) : angleDeg(angle) {}
+
+    ShapeType GetType() const override { return ShapeType::Halfspace; }
+
+    // Unit normal: points OUT of the solid side.
+    // angle 0 -> (0, 1) = straight up
+    Vector2 GetNormal() const
+    {
+        float rad = angleDeg * DEG2RAD;
+        return { -sinf(rad), cosf(rad) };
+    }
+
+    // Direction along the surface (perpendicular to the normal)
+    Vector2 GetTangent() const
+    {
+        float rad = angleDeg * DEG2RAD;
+        return { cosf(rad), sinf(rad) };
+    }
+};
+
 // =====================================================
 // PhysicsBody: one object in the simulation
 // =====================================================
 class PhysicsBody
 {
 public:
-    Vector2 position = { 0.0f, 0.0f };   // units
+    Vector2 position = { 0.0f, 0.0f };   // units (for a halfspace: a point on its plane)
     Vector2 velocity = { 0.0f, 0.0f };   // units per second
     float drag = 0.0f;                   // stored, not used yet (no air resistance)
-    float mass = 1.0f;                   // kg, used in later labs
+    float mass = 1.0f;                   // kg
 
     std::shared_ptr<PhysicsShape> shape; // shape + dimensions for collision
 
-    bool active = true;                  // false = stopped (landed / left the world)
-    bool isStatic = false;               // true = simulation does not move it (test targets)
+    bool active = true;                  // false = left the world, stops updating
+    bool isFixed = false;                // true = static, never moved by gravity or collisions
+    bool isHeld = false;                 // true while the mouse is dragging it
     bool isOverlapping = false;          // set by the collision system every frame
 
     Color color = DARKBLUE;              // original color
-    std::vector<Vector2> trail;          // positions over time, only for drawing
+    std::vector<Vector2> trail;          // recent positions, only for drawing
 
     PhysicsBody(Vector2 startPos, Vector2 startVel, std::shared_ptr<PhysicsShape> s, Color c)
         : position(startPos), velocity(startVel), shape(s), color(c)
     {
-        trail.push_back(position);
+    }
+
+    // 0 = cannot be pushed (fixed or held by the mouse)
+    float GetInverseMass() const
+    {
+        if (isFixed || isHeld || mass <= 0.0f) return 0.0f;
+        return 1.0f / mass;
     }
 
     // Color to draw with: RED while overlapping, original color otherwise
@@ -92,54 +126,118 @@ public:
         return isOverlapping ? RED : color;
     }
 
-    // Returns the radius if this body is a sphere, 0 otherwise
-    float GetSphereRadius() const
-    {
-        if (shape && shape->GetType() == ShapeType::Sphere)
-            return std::static_pointer_cast<Sphere>(shape)->radius;
-        return 0.0f;
-    }
+    bool IsSphere() const    { return shape && shape->GetType() == ShapeType::Sphere; }
+    bool IsHalfspace() const { return shape && shape->GetType() == ShapeType::Halfspace; }
+
+    Sphere* AsSphere() const       { return IsSphere() ? static_cast<Sphere*>(shape.get()) : nullptr; }
+    Halfspace* AsHalfspace() const { return IsHalfspace() ? static_cast<Halfspace*>(shape.get()) : nullptr; }
 };
 
 // =====================================================
-// CollisionSystem: overlap tests between shapes
+// Contact: result of one collision test
+// =====================================================
+struct Contact
+{
+    bool hit = false;
+    Vector2 normal = { 0.0f, 1.0f };  // unit vector pointing from body A towards body B
+    float penetration = 0.0f;         // how deep they overlap, in units
+};
+
+// =====================================================
+// CollisionSystem: overlap tests + collision response
 // =====================================================
 class CollisionSystem
 {
 public:
-    // Two spheres overlap when the distance between centers
-    // is smaller than the sum of their radii.
-    // Compare squared values -> no sqrt needed.
-    static bool SphereSphereOverlap(Vector2 posA, float radiusA, Vector2 posB, float radiusB)
+    // Sphere vs Sphere:
+    // overlap when distance between centers < sum of radii
+    static Contact SphereSphere(Vector2 posA, float radiusA, Vector2 posB, float radiusB)
     {
+        Contact c;
         Vector2 diff = posB - posA;
         float distanceSq = diff.x * diff.x + diff.y * diff.y;
         float radiusSum = radiusA + radiusB;
-        return distanceSq < radiusSum * radiusSum;
+
+        if (distanceSq >= radiusSum * radiusSum) return c;   // no overlap
+
+        float distance = sqrtf(distanceSq);
+        c.hit = true;
+        c.penetration = radiusSum - distance;
+        // Same center -> any direction works, push straight up
+        c.normal = (distance > 0.0001f) ? diff * (1.0f / distance) : Vector2{ 0.0f, 1.0f };
+        return c;
+    }
+
+    // Sphere (A) vs Halfspace (B):
+    // signed distance from the plane to the sphere center = dot(center - planePoint, normal)
+    // overlap when that distance < radius (negative = center is inside the solid side)
+    static Contact SphereHalfspace(Vector2 spherePos, float radius, Vector2 planePoint, Vector2 planeNormal)
+    {
+        Contact c;
+        float distance = Vector2DotProduct(spherePos - planePoint, planeNormal);
+
+        if (distance >= radius) return c;   // fully in front of the plane
+
+        c.hit = true;
+        c.penetration = radius - distance;
+        c.normal = planeNormal * -1.0f;     // from the sphere (A) into the halfspace (B)
+        return c;
     }
 
     // Picks the right test based on the shape types of both bodies
-    static bool CheckOverlap(const PhysicsBody& a, const PhysicsBody& b)
+    static Contact Check(const PhysicsBody& a, const PhysicsBody& b)
     {
-        if (!a.shape || !b.shape) return false;
+        if (a.IsSphere() && b.IsSphere())
+            return SphereSphere(a.position, a.AsSphere()->radius, b.position, b.AsSphere()->radius);
 
-        ShapeType typeA = a.shape->GetType();
-        ShapeType typeB = b.shape->GetType();
+        if (a.IsSphere() && b.IsHalfspace())
+            return SphereHalfspace(a.position, a.AsSphere()->radius, b.position, b.AsHalfspace()->GetNormal());
 
-        if (typeA == ShapeType::Sphere && typeB == ShapeType::Sphere)
+        if (a.IsHalfspace() && b.IsSphere())
         {
-            float rA = std::static_pointer_cast<Sphere>(a.shape)->radius;
-            float rB = std::static_pointer_cast<Sphere>(b.shape)->radius;
-            return SphereSphereOverlap(a.position, rA, b.position, rB);
+            // Same test with A and B swapped, then flip the normal back to "A towards B"
+            Contact c = SphereHalfspace(b.position, b.AsSphere()->radius, a.position, a.AsHalfspace()->GetNormal());
+            c.normal = c.normal * -1.0f;
+            return c;
         }
 
-        return false; // shape pair not supported yet
+        return Contact{};   // halfspace vs halfspace: not needed (both are always fixed)
+    }
+
+    // Collision response (separation):
+    // move the bodies apart along the normal until they just touch.
+    // The push is shared by inverse mass: a fixed body (inverse mass 0) never moves.
+    static void Separate(PhysicsBody& a, PhysicsBody& b, const Contact& c, bool removeApproachVelocity)
+    {
+        float invA = a.GetInverseMass();
+        float invB = b.GetInverseMass();
+        float invSum = invA + invB;
+        if (invSum <= 0.0f) return;   // both fixed: nothing can move
+
+        a.position -= c.normal * (c.penetration * invA / invSum);
+        b.position += c.normal * (c.penetration * invB / invSum);
+
+        if (!removeApproachVelocity) return;
+
+        // Optional: cancel the part of the velocity that drives INTO the other body.
+        // Without it, gravity keeps growing the velocity while the body rests,
+        // and fast bodies start tunneling through each other.
+        if (invA > 0.0f)
+        {
+            float into = Vector2DotProduct(a.velocity, c.normal);       // A moving towards B?
+            if (into > 0.0f) a.velocity -= c.normal * into;
+        }
+        if (invB > 0.0f)
+        {
+            float into = Vector2DotProduct(b.velocity, c.normal);       // B moving towards A?
+            if (into < 0.0f) b.velocity -= c.normal * into;
+        }
     }
 };
 
 // =====================================================
 // PhysicsSimulation: owns the bodies, moves them,
-// then checks collisions
+// then detects and resolves collisions
 // =====================================================
 class PhysicsSimulation
 {
@@ -148,20 +246,25 @@ public:
     float time = 0.0f;                      // seconds since the simulation started
     Vector2 gravity = { 0.0f, -9.81f };     // units per second^2 (direction + magnitude)
 
+    bool collisionResponse = true;          // false = Lab 4 behaviour (overlap only)
+    bool removeApproachVelocity = true;     // see CollisionSystem::Separate
+    int solverIterations = 6;               // resolve passes per frame (helps piles of spheres)
+
     std::vector<PhysicsBody> bodies;
-    int overlapCount = 0;                   // overlapping pairs found last frame
+    int contactCount = 0;                   // touching pairs found this frame (before separating)
+    int overlapCount = 0;                   // pairs still overlapping at the end of the frame
 
     void AddBody(const PhysicsBody& body)
     {
         bodies.push_back(body);
     }
 
-    // Removes only the launched (non-static) bodies
-    void ClearLaunched()
+    // Removes only the moving (non-fixed) spheres
+    void ClearDynamic()
     {
         std::vector<PhysicsBody> kept;
         for (const PhysicsBody& b : bodies)
-            if (b.isStatic) kept.push_back(b);
+            if (b.isFixed) kept.push_back(b);
         bodies = kept;
     }
 
@@ -172,7 +275,8 @@ public:
         time += dt;
 
         MoveBodies();
-        DetectCollisions();
+        HandleCollisions();
+        RecordTrails();
     }
 
 private:
@@ -180,125 +284,202 @@ private:
     {
         for (PhysicsBody& b : bodies)
         {
-            if (!b.active || b.isStatic) continue;
+            if (!b.active || b.isFixed || b.isHeld) continue;
 
             // Kinematics (semi-implicit Euler):
             b.velocity += gravity * deltaTime;      // v = v + g * dt
             b.position += b.velocity * deltaTime;   // p = p + v * dt
 
-            b.trail.push_back(b.position);
-
-            // Stop the body when it reaches the ground or leaves the world
-            // (not a real collision response - just so it stays on screen)
-            float radius = b.GetSphereRadius();
-            if (b.position.y <= radius)
-            {
-                b.position.y = radius;
-                b.trail.back() = b.position;
-                b.active = false;
-            }
-            else if (b.position.x < -5.0f || b.position.x > 30.0f || b.position.y > 30.0f)
+            // Far outside the world -> stop updating it
+            if (b.position.x < -10.0f || b.position.x > 35.0f ||
+                b.position.y < -20.0f || b.position.y > 40.0f)
             {
                 b.active = false;
             }
         }
     }
 
-    // Check every pair once (i < j). No collision response:
-    // bodies pass through each other, we only mark them.
-    void DetectCollisions()
+    void HandleCollisions()
     {
         for (PhysicsBody& b : bodies)
             b.isOverlapping = false;
 
         overlapCount = 0;
+        contactCount = 0;
 
-        for (size_t i = 0; i < bodies.size(); i++)
+        int passes = collisionResponse ? solverIterations : 1;
+
+        for (int pass = 0; pass < passes; pass++)
         {
-            for (size_t j = i + 1; j < bodies.size(); j++)
+            // Check every pair once (i < j)
+            for (size_t i = 0; i < bodies.size(); i++)
             {
-                if (CollisionSystem::CheckOverlap(bodies[i], bodies[j]))
+                for (size_t j = i + 1; j < bodies.size(); j++)
                 {
-                    bodies[i].isOverlapping = true;
-                    bodies[j].isOverlapping = true;
-                    overlapCount++;
+                    PhysicsBody& a = bodies[i];
+                    PhysicsBody& b = bodies[j];
+                    if (!a.active || !b.active) continue;
+
+                    Contact c = CollisionSystem::Check(a, b);
+                    if (!c.hit) continue;
+
+                    if (pass == 0) contactCount++;
+
+                    // Colors come from the LAST pass:
+                    // response OFF -> every overlap is red (Lab 4)
+                    // response ON  -> red only if the overlap is still there after separating
+                    if (pass == passes - 1 && c.penetration > (collisionResponse ? 0.02f : 0.0f))
+                    {
+                        a.isOverlapping = true;
+                        b.isOverlapping = true;
+                        overlapCount++;
+                    }
+
+                    if (collisionResponse)
+                        CollisionSystem::Separate(a, b, c, removeApproachVelocity);
                 }
             }
         }
     }
+
+    void RecordTrails()
+    {
+        const size_t maxTrail = 60;
+        for (PhysicsBody& b : bodies)
+        {
+            if (!b.IsSphere() || b.isFixed || !b.active) continue;
+            b.trail.push_back(b.position);
+            if (b.trail.size() > maxTrail) b.trail.erase(b.trail.begin());
+        }
+    }
 };
 
-// Test spheres that hang in the air (static) - can be dragged with the mouse
-void AddTestSpheres(PhysicsSimulation& sim)
-{
-    struct TestSphere { Vector2 pos; float radius; Color color; };
-    const TestSphere tests[] =
-    {
-        { {  6.0f, 4.0f }, 0.8f, DARKBLUE  },
-        { {  9.5f, 2.5f }, 1.2f, DARKGREEN },
-        { { 12.0f, 6.0f }, 0.6f, PURPLE    },
-        { { 15.0f, 3.0f }, 1.0f, BROWN     },
-        { { 16.3f, 3.6f }, 0.8f, DARKGRAY  },   // starts overlapping the brown one
-    };
+// ---------------- Scene setup ----------------
+const Color sphereColors[] = { DARKBLUE, ORANGE, DARKGREEN, PURPLE, BROWN, SKYBLUE, GOLD, LIME, VIOLET, DARKGRAY };
+const int sphereColorCount = sizeof(sphereColors) / sizeof(sphereColors[0]);
 
-    for (const TestSphere& t : tests)
+void AddHalfspace(PhysicsSimulation& sim, Vector2 point, float angleDeg, Color c)
+{
+    PhysicsBody body(point, { 0.0f, 0.0f }, std::make_shared<Halfspace>(angleDeg), c);
+    body.isFixed = true;
+    sim.AddBody(body);
+}
+
+void AddFixedSphere(PhysicsSimulation& sim, Vector2 pos, float radius, Color c)
+{
+    PhysicsBody body(pos, { 0.0f, 0.0f }, std::make_shared<Sphere>(radius), c);
+    body.isFixed = true;
+    sim.AddBody(body);
+}
+
+void AddDynamicSphere(PhysicsSimulation& sim, Vector2 pos, Vector2 vel, float radius, Color c)
+{
+    sim.AddBody(PhysicsBody(pos, vel, std::make_shared<Sphere>(radius), c));
+}
+
+// A "valley" of static halfspaces at different angles + two fixed spheres
+void BuildScene(PhysicsSimulation& sim)
+{
+    sim.bodies.clear();
+
+    AddHalfspace(sim, { 9.5f, 0.0f },   0.0f, DARKGRAY);    // flat floor
+    AddHalfspace(sim, { 8.0f, 0.0f }, -25.0f, DARKBROWN);   // left slope (rises to the left)
+    AddHalfspace(sim, { 11.0f, 0.0f }, 40.0f, DARKBLUE);    // right slope (rises to the right)
+
+    AddFixedSphere(sim, { 6.5f, 6.0f }, 0.7f, DARKGREEN);
+    AddFixedSphere(sim, { 13.0f, 5.5f }, 0.9f, PURPLE);
+}
+
+// B: several spheres fall from the top
+void DropSpheres(PhysicsSimulation& sim, int count, int& colorIndex)
+{
+    for (int i = 0; i < count; i++)
     {
-        PhysicsBody body(t.pos, { 0.0f, 0.0f }, std::make_shared<Sphere>(t.radius), t.color);
-        body.isStatic = true;
-        sim.AddBody(body);
+        Vector2 pos = { GetRandomValue(400, 1500) / 100.0f, GetRandomValue(800, 1000) / 100.0f };
+        float radius = GetRandomValue(30, 60) / 100.0f;
+        AddDynamicSphere(sim, pos, { 0.0f, 0.0f }, radius, sphereColors[colorIndex % sphereColorCount]);
+        colorIndex++;
     }
+}
+
+// raylib only fills triangles with one winding order (back-face culling),
+// so draw both orders - exactly one of them is visible.
+void DrawTriangleAnyOrder(Vector2 a, Vector2 b, Vector2 c, Color col)
+{
+    DrawTriangle(a, b, c, col);
+    DrawTriangle(a, c, b, col);
+}
+
+void DrawHalfspace(const PhysicsBody& b)
+{
+    const Halfspace* h = b.AsHalfspace();
+    Vector2 n = h->GetNormal();
+    Vector2 t = h->GetTangent();
+    const float L = 100.0f;   // "infinite" for this screen
+
+    // Solid side: a huge quad behind the plane
+    Vector2 p1 = WorldToScreen(b.position - t * L);
+    Vector2 p2 = WorldToScreen(b.position + t * L);
+    Vector2 p3 = WorldToScreen(b.position + t * L - n * L);
+    Vector2 p4 = WorldToScreen(b.position - t * L - n * L);
+    Color fill = Fade(b.GetDrawColor(), 0.12f);
+    DrawTriangleAnyOrder(p1, p2, p3, fill);
+    DrawTriangleAnyOrder(p1, p3, p4, fill);
+
+    // The plane itself (a line in 2D)
+    DrawLineEx(p1, p2, 3.0f, b.GetDrawColor());
+}
+
+// Handle point + normal arrow (drawn last, so spheres never hide it)
+void DrawHalfspaceHandle(const PhysicsBody& b, bool highlighted)
+{
+    const Halfspace* h = b.AsHalfspace();
+    Vector2 n = h->GetNormal();
+    Vector2 handle = WorldToScreen(b.position);
+    DrawLineEx(handle, WorldToScreen(b.position + n * 0.8f), 2.0f, b.GetDrawColor());
+    DrawCircleV(handle, 7.0f, highlighted ? YELLOW : b.GetDrawColor());
+    DrawCircleLinesV(handle, 7.0f, BLACK);
+    if (highlighted)
+        DrawText(TextFormat("angle %.0f deg", h->angleDeg), (int)handle.x - 40, (int)handle.y + 12, 16, BLACK);
 }
 
 int main()
 {
-    InitWindow(SCREEN_W, SCREEN_H, "GAME2005 Lab 3 - Sphere-Sphere Overlap - Myroslav Pochynok");
+    InitWindow(SCREEN_W, SCREEN_H, "GAME2005 Lab 5 - Collision Response - Myroslav Pochynok");
     SetTargetFPS(60);
 
     PhysicsSimulation sim;
-    AddTestSpheres(sim);
+    BuildScene(sim);
 
     // Launch settings
-    Vector2 launchPosition = { 1.0f, 1.0f };  // units
-    float launchAngle = 45.0f;                // degrees
-    float launchSpeed = 10.0f;                // units per second
-    float launchRadius = 0.3f;                // units, radius of the launched sphere
+    Vector2 launchPosition = { 1.0f, 5.0f };  // units
+    float launchAngle = 30.0f;                // degrees
+    float launchSpeed = 8.0f;                 // units per second
+    float launchRadius = 0.35f;               // units
 
     // Gravity settings (turned into sim.gravity every frame)
     float gravityMagnitude = 9.81f;           // units per second^2
     float gravityAngle = -90.0f;              // degrees, -90 = straight down
 
-    // No red-like colors here, so the RED overlap color is easy to see
-    const Color ballColors[] = { DARKBLUE, ORANGE, DARKGREEN, PURPLE, BROWN, SKYBLUE, GOLD, DARKGRAY };
-    const int colorCount = sizeof(ballColors) / sizeof(ballColors[0]);
-    int launchCount = 0;
-
-    int draggedIndex = -1;                    // index of the sphere held by the mouse
+    int colorIndex = 0;
+    int heldIndex = -1;                       // body held by the mouse
 
     while (!WindowShouldClose())
     {
-        float dt = GetFrameTime();
+        // Cap dt so a lag spike (e.g. dragging the window) can't make bodies jump through things
+        float dt = fminf(GetFrameTime(), 1.0f / 30.0f);
         Vector2 mouseWorld = ScreenToWorld(GetMousePosition());
 
         // ================= INPUT =================
-        // Launch speed / angle
+        // Launch speed / angle / position / radius
         if (IsKeyDown(KEY_UP))    launchSpeed += 5.0f * dt;
         if (IsKeyDown(KEY_DOWN))  launchSpeed -= 5.0f * dt;
         if (IsKeyDown(KEY_LEFT))  launchAngle += 30.0f * dt;
         if (IsKeyDown(KEY_RIGHT)) launchAngle -= 30.0f * dt;
-
-        // Angle presets for the demo
-        if (IsKeyPressed(KEY_ONE))   launchAngle = 0.0f;
-        if (IsKeyPressed(KEY_TWO))   launchAngle = 45.0f;
-        if (IsKeyPressed(KEY_THREE)) launchAngle = 60.0f;
-        if (IsKeyPressed(KEY_FOUR))  launchAngle = 90.0f;
-
-        // Launch position
         if (IsKeyDown(KEY_J)) launchPosition.x -= 3.0f * dt;
         if (IsKeyDown(KEY_L)) launchPosition.x += 3.0f * dt;
         if (IsKeyDown(KEY_I)) launchPosition.y += 3.0f * dt;
         if (IsKeyDown(KEY_K)) launchPosition.y -= 3.0f * dt;
-
-        // Launched sphere radius
         if (IsKeyDown(KEY_Q)) launchRadius -= 0.5f * dt;
         if (IsKeyDown(KEY_E)) launchRadius += 0.5f * dt;
 
@@ -309,85 +490,87 @@ int main()
         if (IsKeyDown(KEY_D)) gravityAngle += 45.0f * dt;
         if (IsKeyPressed(KEY_G)) { gravityMagnitude = 9.81f; gravityAngle = -90.0f; }
 
-        // Keep values in a sensible range
         launchSpeed = Clamp(launchSpeed, 1.0f, 20.0f);
-        launchAngle = Clamp(launchAngle, 0.0f, 180.0f);
+        launchAngle = Clamp(launchAngle, -90.0f, 180.0f);
         launchPosition.x = Clamp(launchPosition.x, 0.0f, 19.0f);
-        launchPosition.y = Clamp(launchPosition.y, 0.0f, 9.0f);
+        launchPosition.y = Clamp(launchPosition.y, 0.0f, 9.5f);
         launchRadius = Clamp(launchRadius, 0.1f, 1.5f);
         gravityMagnitude = Clamp(gravityMagnitude, 0.0f, 30.0f);
 
-        // Build the gravity vector from magnitude + direction
         sim.gravity = VectorFromAngle(gravityAngle, gravityMagnitude);
 
-        // SPACE: launch a new sphere (can be pressed again and again)
+        // Toggles
+        if (IsKeyPressed(KEY_T)) sim.collisionResponse = !sim.collisionResponse;
+        if (IsKeyPressed(KEY_V)) sim.removeApproachVelocity = !sim.removeApproachVelocity;
+
+        // SPACE: launch one sphere, B: drop several spheres
         if (IsKeyPressed(KEY_SPACE))
         {
-            Vector2 launchVelocity = VectorFromAngle(launchAngle, launchSpeed);
-            sim.AddBody(PhysicsBody(launchPosition, launchVelocity,
-                std::make_shared<Sphere>(launchRadius), ballColors[launchCount % colorCount]));
-            launchCount++;
+            AddDynamicSphere(sim, launchPosition, VectorFromAngle(launchAngle, launchSpeed),
+                launchRadius, sphereColors[colorIndex % sphereColorCount]);
+            colorIndex++;
         }
+        if (IsKeyPressed(KEY_B)) DropSpheres(sim, 6, colorIndex);
 
-        // C: clear launched spheres, R: reset test spheres too
-        if (IsKeyPressed(KEY_C))
-        {
-            sim.ClearLaunched();
-            launchCount = 0;
-            draggedIndex = -1;
-        }
-        if (IsKeyPressed(KEY_R))
-        {
-            sim.bodies.clear();
-            AddTestSpheres(sim);
-            launchCount = 0;
-            draggedIndex = -1;
-        }
+        // C: clear moving spheres, R: reset the whole scene
+        if (IsKeyPressed(KEY_C)) { sim.ClearDynamic(); heldIndex = -1; }
+        if (IsKeyPressed(KEY_R)) { BuildScene(sim); heldIndex = -1; colorIndex = 0; }
 
-        // Mouse: find the sphere under the cursor (point inside sphere test)
+        // Mouse: what is under the cursor? (halfspace handles first, then spheres)
         int hoveredIndex = -1;
-        for (int i = (int)sim.bodies.size() - 1; i >= 0; i--)
+        for (int i = (int)sim.bodies.size() - 1; i >= 0 && hoveredIndex == -1; i--)
         {
             const PhysicsBody& b = sim.bodies[i];
-            float r = b.GetSphereRadius();
-            if (Vector2DistanceSqr(mouseWorld, b.position) < r * r)
-            {
+            if (b.IsHalfspace() && Vector2Distance(mouseWorld, b.position) < 0.25f)
                 hoveredIndex = i;
-                break;
-            }
+        }
+        for (int i = (int)sim.bodies.size() - 1; i >= 0 && hoveredIndex == -1; i--)
+        {
+            const PhysicsBody& b = sim.bodies[i];
+            if (b.IsSphere() && Vector2Distance(mouseWorld, b.position) < b.AsSphere()->radius)
+                hoveredIndex = i;
         }
 
-        // LEFT MOUSE: drag a sphere (it stops being moved by gravity)
+        // LEFT MOUSE: drag a body. While held it acts like a fixed body and pushes others.
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hoveredIndex != -1)
         {
-            draggedIndex = hoveredIndex;
-            sim.bodies[draggedIndex].isStatic = true;
-            sim.bodies[draggedIndex].velocity = { 0.0f, 0.0f };
+            heldIndex = hoveredIndex;
+            sim.bodies[heldIndex].isHeld = true;
+            sim.bodies[heldIndex].velocity = { 0.0f, 0.0f };
+            sim.bodies[heldIndex].active = true;
         }
-        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && heldIndex != -1)
         {
-            draggedIndex = -1;
+            sim.bodies[heldIndex].isHeld = false;
+            sim.bodies[heldIndex].velocity = { 0.0f, 0.0f };
+            heldIndex = -1;
         }
-        if (draggedIndex != -1)
+        if (heldIndex != -1)
+            sim.bodies[heldIndex].position = mouseWorld;
+
+        // F: fix / unfix the sphere under the cursor
+        if (IsKeyPressed(KEY_F) && hoveredIndex != -1 && sim.bodies[hoveredIndex].IsSphere())
         {
-            sim.bodies[draggedIndex].position = mouseWorld;
+            PhysicsBody& b = sim.bodies[hoveredIndex];
+            b.isFixed = !b.isFixed;
+            b.velocity = { 0.0f, 0.0f };
+            b.trail.clear();
         }
 
-        // MOUSE WHEEL: change the radius of the sphere under the cursor
-        int resizeIndex = (draggedIndex != -1) ? draggedIndex : hoveredIndex;
+        // MOUSE WHEEL: sphere -> radius, halfspace -> angle
+        int wheelIndex = (heldIndex != -1) ? heldIndex : hoveredIndex;
         float wheel = GetMouseWheelMove();
-        if (wheel != 0.0f && resizeIndex != -1)
+        if (wheel != 0.0f && wheelIndex != -1)
         {
-            PhysicsBody& b = sim.bodies[resizeIndex];
-            if (b.shape && b.shape->GetType() == ShapeType::Sphere)
-            {
-                auto sphere = std::static_pointer_cast<Sphere>(b.shape);
-                sphere->radius = Clamp(sphere->radius + wheel * 0.1f, 0.1f, 3.0f);
-            }
+            PhysicsBody& b = sim.bodies[wheelIndex];
+            if (b.IsSphere())
+                b.AsSphere()->radius = Clamp(b.AsSphere()->radius + wheel * 0.1f, 0.1f, 3.0f);
+            else if (b.IsHalfspace())
+                b.AsHalfspace()->angleDeg = Clamp(b.AsHalfspace()->angleDeg + wheel * 5.0f, -80.0f, 80.0f);
         }
 
         // ================= UPDATE =================
-        sim.Update(dt);   // move bodies, then detect overlaps
+        sim.Update(dt);   // move -> detect -> separate
 
         // ================= DRAW =================
         BeginDrawing();
@@ -406,109 +589,113 @@ int main()
             Vector2 left = WorldToScreen({ 0.0f, (float)j });
             Vector2 right = WorldToScreen({ 20.0f, (float)j });
             DrawLineV(left, right, Fade(LIGHTGRAY, 0.6f));
-            DrawText(TextFormat("%d", j), (int)ORIGIN_X - 30, (int)left.y - 8, 16, GRAY);
         }
 
-        // Ground
-        DrawLineEx({ 0.0f, ORIGIN_Y }, { (float)SCREEN_W, ORIGIN_Y }, 3.0f, DARKGRAY);
+        // Halfspaces
+        for (int i = 0; i < (int)sim.bodies.size(); i++)
+            if (sim.bodies[i].IsHalfspace())
+                DrawHalfspace(sim.bodies[i]);
 
-        // Green curve: predicted path with p = p0 + v0*t + 1/2*g*t^2
+        // Green curve: predicted path with p = p0 + v0*t + 1/2*g*t^2 (ignores collisions)
         {
             Vector2 v0 = VectorFromAngle(launchAngle, launchSpeed);
             Vector2 prev = WorldToScreen(launchPosition);
-            for (float t = 0.02f; t < 10.0f; t += 0.02f)
+            for (float t = 0.02f; t < 4.0f; t += 0.02f)
             {
                 Vector2 p = launchPosition + v0 * t + sim.gravity * (0.5f * t * t);
-                if (p.y < 0.0f || p.x < -5.0f || p.x > 30.0f || p.y > 30.0f) break;
+                if (p.y < -1.0f || p.x < -2.0f || p.x > 22.0f || p.y > 12.0f) break;
 
                 Vector2 cur = WorldToScreen(p);
-                DrawLineEx(prev, cur, 2.0f, Fade(GREEN, 0.6f));
+                DrawLineEx(prev, cur, 2.0f, Fade(GREEN, 0.5f));
                 prev = cur;
             }
         }
 
-        // Trails first, so spheres are drawn on top
+        // Trails
         for (const PhysicsBody& b : sim.bodies)
-        {
             for (const Vector2& p : b.trail)
-                DrawCircleV(WorldToScreen(p), 2.0f, Fade(b.color, 0.5f));
-        }
-
-        // Thin red line between centers of every overlapping pair
-        for (size_t i = 0; i < sim.bodies.size(); i++)
-        {
-            for (size_t j = i + 1; j < sim.bodies.size(); j++)
-            {
-                if (CollisionSystem::CheckOverlap(sim.bodies[i], sim.bodies[j]))
-                    DrawLineEx(WorldToScreen(sim.bodies[i].position),
-                        WorldToScreen(sim.bodies[j].position), 2.0f, Fade(RED, 0.6f));
-            }
-        }
+                DrawCircleV(WorldToScreen(p), 2.0f, Fade(b.color, 0.35f));
 
         // Spheres: RED when overlapping, original color when not
         for (int i = 0; i < (int)sim.bodies.size(); i++)
         {
             const PhysicsBody& b = sim.bodies[i];
+            if (!b.IsSphere()) continue;
+
             Vector2 center = WorldToScreen(b.position);
-            float radiusPx = b.GetSphereRadius() * PX_PER_UNIT;
+            float radiusPx = b.AsSphere()->radius * PX_PER_UNIT;
 
             DrawCircleV(center, radiusPx, Fade(b.GetDrawColor(), 0.75f));
             DrawCircleLinesV(center, radiusPx, BLACK);
-            DrawCircleV(center, 3.0f, BLACK);   // center point
 
-            if (i == hoveredIndex || i == draggedIndex)
+            if (b.isFixed)
             {
-                DrawCircleLinesV(center, radiusPx + 3.0f, YELLOW);
-                DrawText(TextFormat("r = %.2f", b.GetSphereRadius()),
-                    (int)center.x - 25, (int)(center.y - radiusPx - 22), 16, BLACK);
+                // Fixed spheres get a thick ring + "F"
+                DrawRing(center, radiusPx - 3.0f, radiusPx, 0.0f, 360.0f, 36, BLACK);
+                DrawText("F", (int)center.x - 5, (int)center.y - 9, 20, WHITE);
+            }
+            else
+            {
+                DrawCircleV(center, 3.0f, BLACK);
+                if (b.active)
+                    DrawLineEx(center, WorldToScreen(b.position + b.velocity * 0.15f), 2.0f, BLUE);
             }
 
-            if (b.active && !b.isStatic)
+            if (i == hoveredIndex || i == heldIndex)
             {
-                Vector2 tip = b.position + b.velocity * 0.25f;
-                DrawLineEx(center, WorldToScreen(tip), 3.0f, BLUE);
+                DrawCircleLinesV(center, radiusPx + 3.0f, YELLOW);
+                DrawText(TextFormat("r = %.2f", b.AsSphere()->radius),
+                    (int)center.x - 25, (int)(center.y - radiusPx - 22), 16, BLACK);
             }
         }
 
-        // Launch point (slingshot) + RED initial velocity vector
+        // Halfspace handles
+        for (int i = 0; i < (int)sim.bodies.size(); i++)
+            if (sim.bodies[i].IsHalfspace())
+                DrawHalfspaceHandle(sim.bodies[i], i == hoveredIndex || i == heldIndex);
+
+        // Launch point + RED initial velocity vector + size preview
         Vector2 launchScreen = WorldToScreen(launchPosition);
-        Vector2 launchTip = launchPosition + VectorFromAngle(launchAngle, launchSpeed) * 0.25f;
-        DrawCircleLinesV(launchScreen, launchRadius * PX_PER_UNIT, Fade(BLACK, 0.4f)); // size preview
-        DrawCircleV(launchScreen, 6.0f, BLACK);
-        DrawLineEx(launchScreen, WorldToScreen(launchTip), 4.0f, RED);
+        DrawCircleLinesV(launchScreen, launchRadius * PX_PER_UNIT, Fade(BLACK, 0.4f));
+        DrawCircleV(launchScreen, 5.0f, BLACK);
+        DrawLineEx(launchScreen, WorldToScreen(launchPosition + VectorFromAngle(launchAngle, launchSpeed) * 0.2f), 4.0f, RED);
 
         // Gravity arrow (top right)
         {
-            Vector2 center = { 1150.0f, 330.0f };
-            Vector2 g = sim.gravity * 4.0f;                    // pixels per (unit/s^2)
-            Vector2 tip = { center.x + g.x, center.y - g.y };  // flip y for screen
+            Vector2 center = { 1180.0f, 300.0f };
+            Vector2 g = sim.gravity * 4.0f;
+            Vector2 tip = { center.x + g.x, center.y - g.y };
             DrawCircleLinesV(center, 45.0f, LIGHTGRAY);
             DrawLineEx(center, tip, 3.0f, PURPLE);
             DrawCircleV(tip, 5.0f, PURPLE);
-            DrawText("Gravity", 1115, 385, 18, PURPLE);
+            DrawText("Gravity", 1148, 352, 18, PURPLE);
         }
 
         // HUD - values
-        DrawText("GAME2005 Lab 3 - Sphere-Sphere Overlap", 20, 15, 24, DARKGRAY);
-        DrawText(TextFormat("launchPosition: (%.2f, %.2f)   (J/L, I/K)", launchPosition.x, launchPosition.y), 20, 50, 20, BLACK);
-        DrawText(TextFormat("launchAngle: %.1f deg   (LEFT/RIGHT, 1=0 2=45 3=60 4=90)", launchAngle), 20, 75, 20, BLACK);
-        DrawText(TextFormat("launchSpeed: %.2f u/s   (UP/DOWN)", launchSpeed), 20, 100, 20, BLACK);
-        DrawText(TextFormat("launchRadius: %.2f u   (Q/E)", launchRadius), 20, 125, 20, BLACK);
-        DrawText(TextFormat("gravity: %.2f u/s^2 at %.1f deg = (%.2f, %.2f)   (W/S, A/D, G reset)",
-            gravityMagnitude, gravityAngle, sim.gravity.x, sim.gravity.y), 20, 150, 20, BLACK);
-        DrawText(TextFormat("time: %.2f s   deltaTime: %.4f s   bodies: %d   overlapping pairs: %d",
-            sim.time, sim.deltaTime, (int)sim.bodies.size(), sim.overlapCount), 20, 175, 20, BLACK);
-        DrawText("SPACE: launch   C: clear launched   R: reset all   Mouse: drag sphere, wheel = radius",
-            20, 200, 20, DARKGRAY);
+        int dynamicCount = 0;
+        for (const PhysicsBody& b : sim.bodies) if (b.IsSphere() && !b.isFixed) dynamicCount++;
+
+        DrawRectangle(10, 8, 760, 196, Fade(RAYWHITE, 0.85f));
+        DrawText("GAME2005 Lab 5 - Collision Response (Separation)", 20, 12, 24, DARKGRAY);
+        DrawText(TextFormat("Collision response: %s   (T)", sim.collisionResponse ? "ON  - separate" : "OFF - overlap only (Lab 4)"),
+            20, 44, 20, sim.collisionResponse ? DARKGREEN : RED);
+        DrawText(TextFormat("Remove velocity into surface: %s   (V)", sim.removeApproachVelocity ? "ON" : "OFF"),
+            20, 68, 20, BLACK);
+        DrawText(TextFormat("launch: pos (%.1f, %.1f)  angle %.0f  speed %.1f  radius %.2f",
+            launchPosition.x, launchPosition.y, launchAngle, launchSpeed, launchRadius), 20, 92, 20, BLACK);
+        DrawText(TextFormat("gravity: %.2f u/s^2 at %.0f deg   (W/S, A/D, G reset)", gravityMagnitude, gravityAngle), 20, 116, 20, BLACK);
+        DrawText(TextFormat("time %.1f s  dt %.4f s  moving %d  contacts %d  still overlapping %d",
+            sim.time, sim.deltaTime, dynamicCount, sim.contactCount, sim.overlapCount), 20, 140, 20, BLACK);
+        DrawText("SPACE launch  B drop 6  F fix/unfix  Mouse drag  Wheel radius/angle", 20, 164, 18, DARKGRAY);
+        DrawText("Arrows/JLIK/QE launcher   C clear   R reset", 20, 184, 18, DARKGRAY);
 
         // HUD - legend
-        DrawText("Overlap test:", 900, 50, 18, DARKGRAY);
-        DrawText("d = |posB - posA|", 920, 72, 18, DARKGRAY);
-        DrawText("overlap if d < rA + rB", 920, 94, 18, DARKGRAY);
-        DrawText("RED = overlapping", 900, 122, 18, RED);
-        DrawText("Red line: overlapping pair", 900, 144, 18, RED);
-        DrawText("Blue: current velocity", 900, 166, 18, BLUE);
-        DrawText("Green: predicted path", 900, 188, 18, DARKGREEN);
+        DrawText("RED = overlapping", 960, 14, 18, RED);
+        DrawText("Shaded side = solid halfspace", 960, 36, 18, DARKGRAY);
+        DrawText("F = fixed (static) sphere", 960, 58, 18, BLACK);
+        DrawText("Blue = velocity", 960, 80, 18, BLUE);
+        DrawText("Response: push apart", 960, 108, 18, DARKGRAY);
+        DrawText("along normal by depth", 960, 128, 18, DARKGRAY);
 
         // Name - bottom left
         DrawText("Myroslav Pochynok", 20, SCREEN_H - 30, 20, DARKGRAY);
